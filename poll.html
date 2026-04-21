@@ -1,0 +1,195 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start;">
+    
+    <!-- Voting Section -->
+    <div class="card">
+        <h2>{{ poll.question }}</h2>
+        <p>Created by {{ poll.creator.username }}</p>
+        
+        {% if current_user.is_authenticated %}
+            {% if has_voted %}
+                <div class="alert" style="background: rgba(6, 182, 212, 0.1); border: 1px solid var(--primary); color: #cffafe;">
+                    You have already voted on this poll! Watch the live results update on the right.
+                </div>
+            {% else %}
+                <form id="voteForm">
+                    <input type="hidden" id="pollId" value="{{ poll.id }}">
+                    <div style="margin-top: 2rem;">
+                        {% for choice in poll.choices %}
+                            <div>
+                                <input type="radio" id="choice_{{ choice.id }}" name="choice" value="{{ choice.id }}" class="choice-radio" required>
+                                <label for="choice_{{ choice.id }}" class="choice-label">{{ choice.text }}</label>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div id="voteStatus" style="margin: 1rem 0; color: var(--danger); font-weight: 500;"></div>
+                    
+                    <button type="submit" class="btn" style="width: 100%;" id="submitBtn">Cast Vote</button>
+                </form>
+            {% endif %}
+        {% else %}
+            <div class="alert" style="background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-color);">
+                Please <a href="{{ url_for('login') }}" style="color: var(--primary);">log in</a> or <a href="{{ url_for('register') }}" style="color: var(--primary);">register</a> to vote on this poll.
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Live Results Section -->
+    <div class="card">
+        <h2>Live Results</h2>
+        <p>Updates instantly as votes come in.</p>
+        
+        <div class="chart-container">
+            <canvas id="resultsChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Initialize initial data passed from backend
+    const initialData = {{ initial_results | tojson }};
+    const pollId = {{ poll.id }};
+    
+    // Sort logic just in case
+    const labels = initialData.map(r => r.text);
+    const data = initialData.map(r => r.count);
+    
+    // Gradient logic for beautiful Chart.js bars
+    const ctx = document.getElementById('resultsChart').getContext('2d');
+    
+    const gradientPrimary = ctx.createLinearGradient(0, 0, 0, 400);
+    gradientPrimary.addColorStop(0, '#06b6d4');  // Cyan
+    gradientPrimary.addColorStop(1, '#3b82f6');  // Blue
+    
+    // Create Chart
+    let resultsChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Votes',
+                data: data,
+                backgroundColor: gradientPrimary,
+                borderRadius: 8,
+                borderWidth: 0,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        stepSize: 1
+                    },
+                    grid: {
+                        color: 'rgba(255, 255, 255, 0.1)',
+                        borderDash: [5, 5]
+                    }
+                },
+                x: {
+                    ticks: {
+                        color: 'rgba(255, 255, 255, 0.7)',
+                    },
+                    grid: {
+                        display: false
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                    titleFont: { size: 14, family: "'Outfit', sans-serif" },
+                    bodyFont: { size: 14, family: "'Outfit', sans-serif" },
+                    padding: 12,
+                    cornerRadius: 8
+                }
+            },
+            animation: {
+                duration: 1000,
+                easing: 'easeOutQuart'
+            }
+        }
+    });
+
+    // Handle Vote Submission
+    const voteForm = document.getElementById('voteForm');
+    if (voteForm) {
+        voteForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const statusDiv = document.getElementById('voteStatus');
+            const selectedChoice = document.querySelector('input[name="choice"]:checked');
+            
+            if (!selectedChoice) {
+                statusDiv.innerText = "Please select an option.";
+                return;
+            }
+            
+            submitBtn.disabled = true;
+            submitBtn.innerText = "Voting...";
+            
+            try {
+                const response = await fetch('/api/vote', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        poll_id: pollId,
+                        choice_id: parseInt(selectedChoice.value)
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    // Update UI to show voted state
+                    voteForm.innerHTML = `<div class="alert" style="background: rgba(6, 182, 212, 0.1); border: 1px solid var(--primary); color: #cffafe; animation: fadeIn 0.5s ease-out forwards;">
+                        ${result.message} Watch the live results update.
+                    </div>`;
+                } else {
+                    statusDiv.innerText = result.message;
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "Cast Vote";
+                }
+            } catch (err) {
+                statusDiv.innerText = "An error occurred. Please try again.";
+                submitBtn.disabled = false;
+                submitBtn.innerText = "Cast Vote";
+            }
+        });
+    }
+
+    // Socket.IO Integration
+    const socket = io();
+    
+    socket.on('connect', () => {
+        console.log('Connected to WebSocket');
+    });
+    
+    socket.on('results_updated', (payload) => {
+        // Only update if it's for this poll
+        if (payload.poll_id === pollId) {
+            const newResults = payload.results;
+            
+            // Update the chart data dynamically
+            resultsChart.data.labels = newResults.map(r => r.text);
+            resultsChart.data.datasets[0].data = newResults.map(r => r.count);
+            
+            // Re-render
+            resultsChart.update();
+            console.log('Chart updated with new live results');
+        }
+    });
+</script>
+{% endblock %}
